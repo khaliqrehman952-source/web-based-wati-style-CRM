@@ -64,4 +64,4 @@ Server runs on port 3000 by default.
 🚧 In Development
 
 ## Author
-Wajid — BAI-22F-019
+Wajid Rehman

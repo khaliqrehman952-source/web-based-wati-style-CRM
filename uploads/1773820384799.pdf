@@ -1,0 +1,17 @@
+Following are details of model design, your task is to describe in step by step
+
+Model Name is CAT: Chart Attention Transformer
+
+CAT Architecture::
+
+Lightweight design choices (e.g., MobileViT, DistilBERT, etc.)
+
+Input encoding (chart image, OCR tokens, question)
+
+Reasoning module (if any):
+
+Chain of Thought (CoT)
+
+Attention flow
+
+Multimodal graph

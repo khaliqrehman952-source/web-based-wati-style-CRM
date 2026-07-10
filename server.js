@@ -154,6 +154,19 @@ async function initDB() {
             UNIQUE(user_id, type)
         );
     `)
+
+    // 🆕 Auto-migration: ensures older/pre-existing tables also get the newer columns
+    // (safe to run every time — IF NOT EXISTS prevents errors on repeated startup)
+    await pool.query(`
+        ALTER TABLE tags ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+        ALTER TABLE teams ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS wa_message_id TEXT;
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'sent';
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS deleted_for_everyone BOOLEAN DEFAULT false;
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS pinned BOOLEAN DEFAULT false;
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id INTEGER REFERENCES messages(id);
+    `)
+
     console.log("✅ DB tables ready")
 }
 
@@ -178,7 +191,7 @@ io.on("connection", socket => {
 
 /* ================= HELPER: SAVE MESSAGE ================= */
 
-async function saveMessage(phone, text, type, mediaUrl, sender, userId = null) {
+async function saveMessage(phone, text, type, mediaUrl, sender, userId = null, waMessageId = null, replyToId = null) {
     // Upsert contact
     let c = await pool.query("SELECT id FROM contacts WHERE phone_number=$1", [phone])
     let contactId
@@ -212,9 +225,9 @@ async function saveMessage(phone, text, type, mediaUrl, sender, userId = null) {
 
     // Insert message
     const msg = await pool.query(
-        `INSERT INTO messages(conversation_id, sender, message_text, type, media_url)
-         VALUES($1,$2,$3,$4,$5) RETURNING *`,
-        [convId, sender, text, type, mediaUrl]
+        `INSERT INTO messages(conversation_id, sender, message_text, type, media_url, wa_message_id, reply_to_id)
+         VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+        [convId, sender, text, type, mediaUrl, waMessageId, replyToId]
     )
 
     // Fetch full conversation data to emit to inbox
@@ -306,6 +319,9 @@ async function sendText(phone, message) {
 
         console.log("✅ WhatsApp message sent:", response.data)
 
+        // 🆕 Return WhatsApp's message ID so we can track delivered/read status later
+        return response.data.messages?.[0]?.id || null
+
     } catch (err) {
 
         console.log(
@@ -331,9 +347,10 @@ async function sendMedia(phone, filePath, type) {
     )
 
     const mediaId = uploadRes.data.id
+    let sendRes
 
     if (type === "audio") {
-        await axios.post(
+        sendRes = await axios.post(
             `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
             {
                 messaging_product: "whatsapp",
@@ -344,7 +361,7 @@ async function sendMedia(phone, filePath, type) {
             { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
         )
     } else {
-        await axios.post(
+        sendRes = await axios.post(
             `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
             {
                 messaging_product: "whatsapp",
@@ -355,6 +372,9 @@ async function sendMedia(phone, filePath, type) {
             { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
         )
     }
+
+    // 🆕 Return WhatsApp's message ID so we can track delivered/read status later
+    return sendRes.data.messages?.[0]?.id || null
 }
 
 /* ================= HELPER: BUSINESS TIMEZONE ================= */
@@ -443,8 +463,8 @@ async function fireReply(userId, type, phone) {
     const reply = r.rows[0]
     if (!reply || !reply.enabled || !reply.message_text) return
 
-    await sendText(phone, reply.message_text)
-    await saveMessage(phone, reply.message_text, "text", null, "agent", userId)
+    const waId = await sendText(phone, reply.message_text)
+    await saveMessage(phone, reply.message_text, "text", null, "agent", userId, waId)
 }
 
 /* ================= WEBHOOK VERIFY ================= */
@@ -466,7 +486,32 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", async (req, res) => {
     try {
-        const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]
+        const value = req.body.entry?.[0]?.changes?.[0]?.value
+
+        // 🆕 Handle delivered/read status updates from WhatsApp
+        const statuses = value?.statuses
+        if (statuses && statuses.length) {
+            for (const s of statuses) {
+                try {
+                    const updated = await pool.query(
+                        "UPDATE messages SET status=$1 WHERE wa_message_id=$2 RETURNING id, conversation_id",
+                        [s.status, s.id]
+                    )
+                    if (updated.rows.length) {
+                        io.emit("message_status_update", {
+                            message_id: updated.rows[0].id,
+                            wa_message_id: s.id,
+                            status: s.status,
+                            conversation_id: updated.rows[0].conversation_id
+                        })
+                    }
+                } catch (statusErr) {
+                    console.error("status update error:", statusErr.message)
+                }
+            }
+        }
+
+        const msg = value?.messages?.[0]
 
         if (msg) {
             const phone = msg.from
@@ -499,7 +544,7 @@ app.post("/webhook", async (req, res) => {
             const contactRes = await pool.query("SELECT user_id FROM contacts WHERE phone_number=$1", [phone])
             const ownerUserId = contactRes.rows[0]?.user_id || null
 
-            await saveMessage(phone, text, type, mediaUrl, "user", ownerUserId)
+            await saveMessage(phone, text, type, mediaUrl, "user", ownerUserId, msg.id || null)
             await maybeSendAutoReply(phone, ownerUserId)   // 👈 NEW LINE
         }
     } catch (err) {
@@ -513,14 +558,14 @@ app.post("/webhook", async (req, res) => {
 
 app.post("/send-message", upload.single("media"), async (req, res) => {
     try {
-        const { phone, message } = req.body
+        const { phone, message, reply_to_id } = req.body
 
         if (!phone) return res.status(400).json({ error: "phone is required" })
 
         if (message && message.trim()) {
-            await sendText(phone, message)
+            const waId = await sendText(phone, message)
             const userId = req.body.user_id || null
-            await saveMessage(phone, message, "text", null, "agent", userId)
+            await saveMessage(phone, message, "text", null, "agent", userId, waId, reply_to_id || null)
         }
 
         if (req.file) {
@@ -532,8 +577,9 @@ app.post("/send-message", upload.single("media"), async (req, res) => {
             if (req.file.mimetype.includes("video")) type = "video"
             if (req.file.mimetype.includes("audio")) type = "audio"
 
-            await sendMedia(phone, filePath, type)
-            await saveMessage(phone, req.file.originalname, type, url, "agent")
+            const waId = await sendMedia(phone, filePath, type)
+            const userId = req.body.user_id || null
+            await saveMessage(phone, req.file.originalname, type, url, "agent", userId, waId, reply_to_id || null)
         }
 
         res.json({ ok: true })
@@ -602,6 +648,10 @@ app.get("/conversations/:id/messages", async (req, res) => {
                 message_text AS text,
                 type,
                 media_url,
+                status,
+                pinned,
+                deleted_for_everyone,
+                reply_to_id,
                 created_at
              FROM messages
              WHERE conversation_id=$1
@@ -646,12 +696,63 @@ app.get("/conversations/:id", async (req, res) => {
 
 /* ================= UPDATE CONVERSATION STATUS ================= */
 
-/* ================= UPDATE CONVERSATION STATUS ================= */
-
 app.patch("/conversations/:id/status", async (req, res) => {
     try {
         const { status } = req.body
         await pool.query("UPDATE conversations SET status=$1 WHERE id=$2", [status, req.params.id])
+        res.json({ ok: true })
+    } catch (err) {
+        res.status(500).json({ error: err.message })
+    }
+})
+
+/* ================= MARK CONVERSATION AS READ (sends read receipt to customer) ================= */
+
+app.post("/conversations/:id/mark-read", async (req, res) => {
+    try {
+        const lastMsg = await pool.query(
+            "SELECT wa_message_id FROM messages WHERE conversation_id=$1 AND sender='user' AND wa_message_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+            [req.params.id]
+        )
+        if (lastMsg.rows.length && lastMsg.rows[0].wa_message_id) {
+            await axios.post(
+                `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+                { messaging_product: "whatsapp", status: "read", message_id: lastMsg.rows[0].wa_message_id },
+                { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+            )
+        }
+        res.json({ ok: true })
+    } catch (err) {
+        console.error("mark-read error:", err.response?.data || err.message)
+        res.json({ ok: false })
+    }
+})
+
+/* ================= DELETE MESSAGE (for me / for everyone) ================= */
+
+app.delete("/messages/:id", async (req, res) => {
+    try {
+        const { mode } = req.query // "me" or "everyone"
+        if (mode === "everyone") {
+            await pool.query(
+                "UPDATE messages SET deleted_for_everyone=true, message_text='This message was deleted' WHERE id=$1",
+                [req.params.id]
+            )
+        } else {
+            await pool.query("DELETE FROM messages WHERE id=$1", [req.params.id])
+        }
+        res.json({ ok: true })
+    } catch (err) {
+        res.status(500).json({ error: err.message })
+    }
+})
+
+/* ================= PIN / UNPIN MESSAGE ================= */
+
+app.patch("/messages/:id/pin", async (req, res) => {
+    try {
+        const { pinned } = req.body
+        await pool.query("UPDATE messages SET pinned=$1 WHERE id=$2", [pinned, req.params.id])
         res.json({ ok: true })
     } catch (err) {
         res.status(500).json({ error: err.message })
@@ -923,7 +1024,7 @@ app.post("/start-conversation", async (req, res) => {
         )
 
         // Conversation save karo
-        await saveMessage(phone, "Hello! 👋", "text", null, "agent", user_id)
+        await saveMessage(phone, "Hello! 👋", "text", null, "agent", user_id, response.data.messages?.[0]?.id || null)
 
         res.json({ ok: true, data: response.data })
     } catch (err) {
@@ -951,8 +1052,8 @@ app.post("/broadcast", async (req, res) => {
 
         for (const contact of eligible) {
             try {
-                await sendText(contact.phone_number, message)
-                await saveMessage(contact.phone_number, message, "text", null, "agent", user_id)
+                const waId = await sendText(contact.phone_number, message)
+                await saveMessage(contact.phone_number, message, "text", null, "agent", user_id, waId)
                 results.sent.push(contact.phone_number)
             } catch (err) {
                 results.failed.push({ phone: contact.phone_number, error: err.response?.data?.error?.message || err.message })

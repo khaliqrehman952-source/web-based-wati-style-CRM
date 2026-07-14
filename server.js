@@ -584,7 +584,7 @@ app.post("/send-message", upload.single("media"), async (req, res) => {
 
         res.json({ ok: true })
     } catch (err) {
-        console.error("send-message error:",err.response?.data || err.message)
+        console.error("send-message error:", err.response?.data || err.message)
         res.status(500).json({ error: err.message })
     }
 })
@@ -783,7 +783,7 @@ app.get("/api/contacts", async (req, res) => {
             query += ` AND user_id = $${params.length}`
         }
         query += ` ORDER BY name ASC`
-        
+
         const r = await pool.query(query, params)
         res.json(r.rows)
     } catch (err) {
@@ -870,7 +870,7 @@ app.post("/api/login", async (req, res) => {
 
         // Users table mein check karo
         const userRow = await pool.query("SELECT * FROM users WHERE email=$1", [email])
-        
+
         if (!userRow.rows.length) {
             const newUser = await pool.query(
                 "INSERT INTO users(name, email, password) VALUES($1,$2,$3) RETURNING *",
@@ -884,10 +884,10 @@ app.post("/api/login", async (req, res) => {
             })
         }
 
-        res.json({ 
-            id: userRow.rows[0].id, 
-            name: userRow.rows[0].name, 
-            email: userRow.rows[0].email, 
+        res.json({
+            id: userRow.rows[0].id,
+            name: userRow.rows[0].name,
+            email: userRow.rows[0].email,
             token: data.session.access_token
         })
     } catch (err) {
@@ -917,7 +917,7 @@ app.post("/api/signup", async (req, res) => {
             return res.status(400).json({ error: "Signup failed. Please try again." })
         }
 
-        res.json({ 
+        res.json({
             message: "success",
             email: email
         })
@@ -1068,9 +1068,9 @@ app.post("/broadcast", async (req, res) => {
         const totalContacts = parseInt(totalRes.rows[0].count)
         const skippedCount = totalContacts - eligible.length
         await pool.query(
-               `INSERT INTO broadcasts(user_id, message, total_contacts, sent_count, skipped_count, failed_count)
+            `INSERT INTO broadcasts(user_id, message, total_contacts, sent_count, skipped_count, failed_count)
                 VALUES($1,$2,$3,$4,$5,$6)`,
-               [user_id, message, totalContacts, results.sent.length, skippedCount, results.failed.length]
+            [user_id, message, totalContacts, results.sent.length, skippedCount, results.failed.length]
         )
         res.json({
             ok: true,
@@ -1441,4 +1441,5 @@ app.get(/.*/, (req, res) => {
 });
 /* ================= START ================= */
 
-server.listen(3000, '0.0.0.0', () => console.log("🚀 SERVER RUNNING on port 3000"))
+const PORT = process.env.PORT || 3000
+server.listen(PORT, '0.0.0.0', () => console.log("🚀 SERVER RUNNING on port " + PORT))

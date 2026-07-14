@@ -704,11 +704,15 @@
             ];
 
             const filteredChats = chats.filter(chat => {
-                if (filter === 'active') return (chat.status || '').toLowerCase() === 'open';
-                if (filter === 'pending') return (chat.status || '').toLowerCase() === 'pending';
-                if (filter === 'solved') return (chat.status || '').toLowerCase() === 'solved';
-                if (filter === 'spam') return (chat.status || '').toLowerCase() === 'spam';
-                if (filter === 'unassigned') return !chat.assignee;
+                let matchesFilter = true;
+                if (filter === 'active') matchesFilter = (chat.status || '').toLowerCase() === 'open';
+                else if (filter === 'pending') matchesFilter = (chat.status || '').toLowerCase() === 'pending';
+                else if (filter === 'solved') matchesFilter = (chat.status || '').toLowerCase() === 'solved';
+                else if (filter === 'spam') matchesFilter = (chat.status || '').toLowerCase() === 'spam';
+                else if (filter === 'unassigned') matchesFilter = !chat.assignee;
+
+                if (!matchesFilter) return false;
+
                 if (search) {
                     const q = search.toLowerCase();
                     return (chat.name || '').toLowerCase().includes(q) || (chat.phone_number || '').includes(q) || (chat.msg || '').toLowerCase().includes(q);
@@ -862,6 +866,11 @@
             }, [id]);
 
             useEffect(() => {
+                setMessages([]);
+                setPreviewMedia(null);
+                setSelectedMsg(null);
+                setReplyingTo(null);
+                setShowForward(false);
                 fetch(`${API_URL}/conversations/${id}/messages`)
                     .then(res => res.json())
                     .then(data => setMessages(Array.isArray(data) ? data : []))
@@ -942,6 +951,7 @@
 
             const handleFilePicked = (fileList) => {
                 const files = Array.from(fileList || []);
+                if (fileInputRef.current) fileInputRef.current.value = "";
                 if (!files.length) return;
                 setPendingFiles(files);
                 setPreviewIndex(0);
